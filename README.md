@@ -16,7 +16,7 @@ A production SaaS platform with two products: (1) an AI-powered investment intel
 
 Not a tutorial. Not a demo. A deployed SaaS product with real property data, AI-powered analysis, a Chrome Extension on 40+ listing sites, an agent CRM with AI voice profiles, subscription billing, and enterprise-grade AWS infrastructure.
 
-**1,122 live property listings** · **11 global markets** · **13 investment calculators** · **AI wealth advisor** · **Chrome Extension (40+ sites)** · **AI Agent CRM** · **8 subscription tiers**
+**9,879 live property listings** · **11 global markets** · **13 investment calculators** · **AI wealth advisor** · **Chrome Extension (40+ sites)** · **AI Agent CRM** · **8 subscription tiers**
 
 **This repository contains the architecture documentation, screenshots, and design decisions.** Production codebase is private.
 
