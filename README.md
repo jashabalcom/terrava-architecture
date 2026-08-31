@@ -1,15 +1,20 @@
 # Terrava — Enterprise Wealth Intelligence Platform
 
-> Production multi-tenant SaaS on AWS. Investment intelligence for global real-estate investors, plus an AI Agent CRM for the agents who serve them. 14 CDK stacks, 77 Lambda functions, multi-model Bedrock with RAG, live across 11 markets.
+> Production multi-tenant SaaS on AWS. Investment intelligence for global real-estate investors, plus an AI Agent CRM for the agents who serve them. 13 CDK stacks, 96 Lambda functions, multi-model Bedrock with RAG, live across 11 markets.
 
 [![Live](https://img.shields.io/badge/Live-dubairealestateinvestor.com-00C853?style=for-the-badge)](https://dubairealestateinvestor.com)
-[![AWS](https://img.shields.io/badge/AWS-14_CDK_Stacks-FF9900?style=for-the-badge&logo=amazonaws)](https://aws.amazon.com)
-[![Lambda](https://img.shields.io/badge/Lambda-77_Functions_·_Graviton2-FF9900?style=for-the-badge&logo=awslambda)](https://aws.amazon.com/lambda/)
+[![AWS](https://img.shields.io/badge/AWS-13_CDK_Stacks-FF9900?style=for-the-badge&logo=amazonaws)](https://aws.amazon.com)
+[![Lambda](https://img.shields.io/badge/Lambda-96_Functions_·_Graviton2-FF9900?style=for-the-badge&logo=awslambda)](https://aws.amazon.com/lambda/)
 [![Bedrock](https://img.shields.io/badge/Bedrock-Multi--Model_Router-8B5CF6?style=for-the-badge&logo=amazonaws)](https://aws.amazon.com/bedrock/)
 [![Markets](https://img.shields.io/badge/Markets-11_Countries-blue?style=for-the-badge)](.)
 [![Extension](https://img.shields.io/badge/Chrome_Extension-40%2B_Sites-4285F4?style=for-the-badge&logo=googlechrome)](.)
 
 This repository holds the architecture documentation, screenshots, and design records for Terrava. The production codebase is private.
+
+**Documentation**
+
+- [Architecture deep dive](docs/ARCHITECTURE.md) — request lifecycles, where state lives, failure modes, scaling limits, and known weaknesses
+- [Decision records](docs/decisions/) — 17 ADRs covering every significant architectural choice, the alternatives rejected, and the cost accepted
 
 ---
 
@@ -17,11 +22,11 @@ This repository holds the architecture documentation, screenshots, and design re
 
 | Area | What's in production |
 |---|---|
-| Infrastructure-as-code | 14 CDK stacks (TypeScript), reproducible across dev / staging / prod with automated drift detection |
-| Compute | 77 Lambda functions on ARM64 / Graviton2 with shared Lambda Layers |
-| Data | Aurora PostgreSQL Serverless v2 with RDS Proxy multiplexing 1,000 Lambda connections down to 20–50 DB connections, plus ElastiCache Redis Serverless |
+| Infrastructure-as-code | 13 CDK stacks (TypeScript), reproducible across dev / staging / prod with automated drift detection |
+| Compute | 96 Lambda functions on ARM64 / Graviton2 with shared Lambda Layers |
+| Data | Supabase managed PostgreSQL as the system of record, plus DynamoDB for the AI response cache, token ledger, prompt registry, and sessions |
 | AI | Multi-model Bedrock router (Sonnet / Haiku / Gemini) with circuit-breaker fallback, RAG over Knowledge Bases + OpenSearch Serverless, Bedrock Guardrails for financial-compliance filtering |
-| Security | Three-tier VPC across three Availability Zones (data tier has no internet route), WAFv2 on edge and API Gateway, KMS customer-managed keys, Secrets Manager, CloudTrail, GuardDuty, custom ES256 JWT authorizer |
+| Security | WAFv2 on edge and API Gateway, KMS customer-managed keys, Secrets Manager, CloudTrail, GuardDuty, custom ES256 JWT authorizer, IAM least-privilege execution roles |
 | Observability | CloudWatch Synthetics canaries every five minutes, X-Ray tracing, custom token-economics dashboards, Budgets anomaly alerts |
 | Async | EventBridge Scheduler, SQS with dead-letter queues for guaranteed delivery |
 | Commercials | Stripe across eight subscription tiers, webhook as source of truth, daily usage metering, tier-gated feature flags |
@@ -36,11 +41,10 @@ This repository holds the architecture documentation, screenshots, and design re
 | Bedrock call reduction | DynamoDB response cache with 24-hour TTL, keyed on hashed prompt + context | 40–60% cache hit rate on production traffic |
 | API cost | API Gateway HTTP v2 instead of REST | 71% cheaper at request volume ($1/M vs $3.50/M) |
 | Compute cost | Lambda on ARM64 / Graviton2 across the fleet | About 20% compute reduction with no performance regression |
-| Database cost | Aurora Serverless v2 (0.5–16 ACU auto-scale) plus RDS Proxy connection multiplexing | About 60% DB cost reduction vs always-on provisioned |
-| Database load | ElastiCache Redis Serverless for response cache plus sliding-window rate limiting | DB load reduced about 73% during peak hours |
+| Infrastructure right-sizing | Retired the VPC, NAT Gateway, Aurora, and ElastiCache once the system of record moved to Supabase and the tier protected nothing | Removed a NAT single point of failure that had already caused a full AI outage, plus ~$40–52/mo of idle spend |
 | Email cost | Moved to Amazon SES v2 with DKIM/SPF/DMARC | About 95% email-infra cost reduction; 99.2% deliverability |
 | Auth latency | Custom ES256 JWT authorizer using `webcrypto.subtle` | About 40 ms shaved per request; no third-party dependency |
-| Time-to-deploy | 14 CDK stacks; full IaC; GitHub Actions OIDC | New environment from `cdk deploy` in under 30 minutes; zero static AWS credentials |
+| Time-to-deploy | 13 CDK stacks; full IaC; GitHub Actions OIDC | New environment from `cdk deploy` in under 30 minutes; zero static AWS credentials |
 
 ---
 
@@ -140,16 +144,14 @@ graph TB
     end
 
     subgraph "API Layer"
-        CF --> APIGW[API Gateway v2<br/>HTTP API - 77 routes]
+        CF --> APIGW[API Gateway v2<br/>HTTP API]
         APIGW --> AUTH[Lambda JWT Authorizer<br/>ES256 webcrypto.subtle]
-        AUTH --> FN[77 Lambda Functions<br/>ARM64 / Graviton2 + Layers]
+        AUTH --> FN[Lambda Functions<br/>ARM64 / Graviton2 + Layers<br/>AWS-managed network]
     end
 
-    subgraph "Data Layer - Isolated Subnets (no internet)"
-        FN --> PROXY[RDS Proxy<br/>1000 → 20-50 conns]
-        PROXY --> AURORA[Aurora PostgreSQL<br/>Serverless v2]
-        AURORA --> READER[Read Replica]
-        FN --> REDIS[ElastiCache Redis<br/>Serverless]
+    subgraph "Data Layer"
+        FN --> SUPA[Supabase PostgreSQL<br/>system of record · TLS]
+        FN --> DDB2[DynamoDB<br/>cache · ledger · sessions]
     end
 
     subgraph "AI Layer — Multi-Model Router"
@@ -179,7 +181,7 @@ graph TB
     end
 
     subgraph "Security & Identity"
-        KMS[KMS CMK] --> AURORA
+        KMS[KMS CMK] --> DDB2
         SM[Secrets Manager] --> FN
         CT[CloudTrail] --> GD[GuardDuty]
         COG[Cognito User Pool<br/>MFA + JWT]
@@ -190,11 +192,14 @@ graph TB
     end
 ```
 
-### VPC — 3-Tier Network Isolation
+### Architecture evolution — retiring the network tier
+
+The platform originally ran a three-tier VPC across three AZs, with Aurora Serverless v2
+behind RDS Proxy and ElastiCache Redis in isolated subnets with no internet route.
 
 ```
 +------------------------------------------------------------------+
-|  VPC (10.0.0.0/16) — 3 Availability Zones                         |
+|  PREVIOUS — VPC (10.0.0.0/16), 3 Availability Zones               |
 |                                                                    |
 |  Public Subnets     — NAT Gateways, load balancers                 |
 |  Private Subnets    — Lambda functions (internet via NAT only)     |
@@ -203,6 +208,33 @@ graph TB
 ```
 
 ![VPC Subnets](docs/screenshots/aws/12-vpc-subnets-3tier.png)
+*The VPC tier as deployed before July 2026. Retained as a record of the previous architecture.*
+
+**That tier was retired in July 2026.** The data plane moved out from under it: the system of
+record became Supabase (managed Postgres over TLS), and Aurora and ElastiCache were deleted in
+earlier cost work. What remained was a VPC whose every egress target — Supabase, Stripe,
+Bedrock — was a **public endpoint**. The functions sat in private subnets, routed all outbound
+traffic through a single NAT Gateway, and gained access to nothing private in return.
+
+The NAT then proved it was a liability rather than a dormant cost: when it was removed during
+unrelated work, every VPC-attached Lambda lost egress at once and the AI features returned
+500s across the board — a single point of failure for a tier that was protecting nothing.
+
+The fix was staged deliberately: detach the functions first (a purely subtractive `cdk diff` —
+37 functions each losing `VpcConfig`, zero resources added, zero IAM or security-group
+changes, fully reversible), verify production health, then tear down the stacks in dependency
+order once AWS had reclaimed the Lambda ENIs.
+
+This is the AWS Well-Architected **Serverless Lens** guidance applied literally: do not place a
+function in a VPC unless it must reach VPC-only resources.
+
+**Full reasoning, including the option that was rejected and why:**
+[ADR-0017 — Retire the VPC, NAT, Aurora, and ElastiCache tier](docs/decisions/0017-retire-vpc-aurora-elasticache.md).
+The superseded records ([0004](docs/decisions/0004-aurora-serverless-v2-with-rds-proxy.md),
+[0010](docs/decisions/0010-three-tier-vpc-isolation.md),
+[0012](docs/decisions/0012-redis-serverless-for-cache-and-rate-limiting.md)) are kept rather
+than deleted — the path from "build the isolated tier" to "remove it once it protected
+nothing" is more informative than either decision on its own.
 
 ---
 
@@ -252,17 +284,25 @@ This tree is the reason AI cost dropped about 60%.
 ![CloudFormation Stacks](docs/screenshots/cloudformation-all-stacks.png)
 *Every stack in `CREATE_COMPLETE`*
 
-### Database — Aurora Serverless v2 + RDS Proxy
+### Database — previous Aurora Serverless v2 + RDS Proxy tier *(retired July 2026)*
 | Aurora Cluster (Writer + Reader) | RDS Proxy Configuration |
 |:---:|:---:|
 | ![Aurora Cluster](docs/screenshots/aws/02-aurora-cluster-writer-reader.png) | ![RDS Proxy](docs/screenshots/aws/03-rds-proxy-config.png) |
 
-- Aurora PostgreSQL Serverless v2 auto-scales **0.5–16 ACU**
-- RDS Proxy multiplexes **1,000 Lambda connections → 20–50 real DB connections**
-- Read replica in separate AZ for failover
+- Aurora PostgreSQL Serverless v2 auto-scaled **0.5–16 ACU**
+- RDS Proxy multiplexed **1,000 Lambda connections → 20–50 real DB connections**
+- Read replica in a separate AZ for failover
 
-### Caching — ElastiCache Redis Serverless
+*Deleted in July 2026 when the system of record moved to Supabase — the connection-multiplexing
+problem RDS Proxy solved does not exist against managed Postgres reached over TLS. Kept here as
+a record of the previous architecture; see [ADR-0017](docs/decisions/0017-retire-vpc-aurora-elasticache.md).*
+
+### Caching — previous ElastiCache Redis Serverless tier *(retired July 2026)*
 ![ElastiCache](docs/screenshots/aws/04-elasticache-serverless.png)
+
+*Deleted alongside the VPC. The rate-limiting role it served is currently unfilled and is the
+platform's highest-priority open gap — see
+[Known weaknesses](docs/ARCHITECTURE.md#known-weaknesses).*
 
 ### AI — Multi-Model Bedrock with RAG
 | AI Investment Advisor (Bedrock) | Bedrock Knowledge Base (RAG) |
@@ -283,9 +323,10 @@ This tree is the reason AI cost dropped about 60%.
 
 **RAG pipeline**: User asks regulatory question → Titan Embeddings v2 vectorizes the query → OpenSearch Serverless finds the 5 most relevant chunks → Claude generates a grounded answer **with citations from the source documents**.
 
-### Compute — 77 Lambda Functions on ARM64
+### Compute — Lambda fleet on ARM64
 ![Lambda List](docs/screenshots/aws/08-lambda-functions-77.png)
-*All ARM64/Graviton2, Node.js 20*
+*All ARM64/Graviton2, Node.js 20. Screenshot taken at 77 functions; the fleet has since grown
+to 96 defined in ApiStack.*
 
 ### API — Gateway HTTP v2
 ![API Gateway](docs/screenshots/aws/10-api-gateway-routes.png)
@@ -317,7 +358,7 @@ This tree is the reason AI cost dropped about 60%.
 
 ---
 
-## 14 CDK Stacks (+2 supporting)
+## 13 CDK Stacks
 
 Every stack is TypeScript CDK. Dependency order managed automatically.
 
@@ -328,33 +369,35 @@ Every stack is TypeScript CDK. Dependency order managed automatically.
 | 3 | **DomainStack** | Route 53, ACM | Custom domain + TLS certificates |
 | 4 | **EmailStack** | SES v2, DKIM | Transactional email with domain verification |
 | 5 | **FrontendStack** | S3, CloudFront, WAFv2 | React SPA hosting with CDN + DDoS protection |
-| 6 | **VpcStack** | VPC, Subnets, NAT, Endpoints | 3-tier network (public/private/isolated) × 3 AZs |
-| 7 | **DatabaseStack** | Aurora Serverless v2, RDS Proxy | PostgreSQL with auto-scaling + connection pooling |
-| 8 | **CacheStack** | ElastiCache Redis Serverless | API response caching + rate limiting |
-| 9 | **ApiStack** | API Gateway v2, 77 Lambdas | HTTP API + ARM64 functions + JWT authorizer |
-| 10 | **MessagingStack** | EventBridge, SQS DLQs | Async job scheduling with failure capture |
-| 11 | **CognitoStack** | Cognito User Pool | Multi-tenant auth with MFA |
-| 12 | **ObservabilityStack** | CloudWatch, Budgets, SNS | Alarms, dashboards, cost anomaly detection |
-| 13 | **BedrockKBStack** | Bedrock KB, OpenSearch Serverless | RAG pipeline over regulatory docs |
-| 14 | **SyntheticsStack** | CloudWatch Synthetics | Canary uptime monitoring |
-| 15 | **DynamoDBStack** | DynamoDB | High-throughput event and session storage |
-| 16 | **AIInfraStack** | DynamoDB (×3), IAM, SSM | AI prompt registry, token tracking, response cache |
+| 6 | **ApiStack** | API Gateway v2, Lambda fleet | HTTP API + ARM64 functions + JWT authorizer |
+| 7 | **MessagingStack** | EventBridge, SQS DLQs | Async job scheduling with failure capture |
+| 8 | **CognitoStack** | Cognito User Pool | Multi-tenant auth with MFA |
+| 9 | **ObservabilityStack** | CloudWatch, Budgets, SNS | Alarms, dashboards, cost anomaly detection |
+| 10 | **BedrockKBStack** | Bedrock KB, OpenSearch Serverless | RAG pipeline over regulatory docs |
+| 11 | **SyntheticsStack** | CloudWatch Synthetics | Canary uptime monitoring |
+| 12 | **DynamoDBStack** | DynamoDB | High-throughput event and session storage |
+| 13 | **AIInfraStack** | DynamoDB (×3), IAM, SSM | AI prompt registry, token tracking, response cache |
+
+**Retired July 2026** — `VpcStack` (3-tier network × 3 AZs), `DatabaseStack` (Aurora
+Serverless v2 + RDS Proxy), and `CacheStack` (ElastiCache Redis Serverless). See
+[ADR-0017](docs/decisions/0017-retire-vpc-aurora-elasticache.md).
 
 ---
 
-## 77 Lambda Functions
+## 96 Lambda Functions
 
-| Group | Count | What They Do |
-|-------|-------|-------------|
-| **AI & Analysis** | 7 | Property analysis, calculator insights, support agent, daily digest, regulatory KB query |
-| **Properties** | 3 | Market data sync, scheduled sync, connection testing |
-| **Email** | 8 | Welcome flow, drip campaigns, trial-ending, payment-failed, weekly digest |
-| **Stripe Billing** | 6 | Checkout, webhooks, subscriptions, customer portal |
-| **Admin** | 3 | Revenue stats, snapshot metrics, alert handler |
-| **Neighborhoods** | 4 | Geocoding, batch-geocode, POI fetching |
-| **News** | 3 | RSS sync, article processing |
-| **Affiliate** | 2 | Commission tracking, referrals |
-| **Data/Auth/Core** | 41 | CRUD, JWT authorizer, health checks, migrations |
+| Group | What They Do |
+|-------|-------------|
+| **AI & Analysis** | Property analysis, calculator insights, support agent, daily digest, regulatory KB query |
+| **Properties** | Market data sync, scheduled sync, connection testing |
+| **Email** | Welcome flow, drip campaigns, trial-ending, payment-failed, weekly digest |
+| **Stripe Billing** | Checkout, webhooks, subscriptions, customer portal |
+| **Admin** | Revenue stats, snapshot metrics, alert handler |
+| **Neighborhoods** | Geocoding, batch-geocode, POI fetching |
+| **News** | RSS sync, article processing |
+| **Affiliate** | Commission tracking, referrals |
+| **Agent CRM** | Messaging, pipeline, voice profile, draft replies, auto-respond |
+| **Data/Auth/Core** | CRUD, JWT authorizer, health checks, migrations |
 
 ---
 
@@ -389,12 +432,12 @@ Every stack is TypeScript CDK. Dependency order managed automatically.
 
 | Layer | Implementation |
 |-------|---------------|
-| **Network** | 3-tier VPC across 3 AZs. Database + cache in **isolated subnets — no internet route**. |
+| **Network** | Lambda runs in the AWS-managed network with no inbound surface. The security boundary is API Gateway + JWT authorizer, not a VPC — see [ADR-0017](docs/decisions/0017-retire-vpc-aurora-elasticache.md). |
 | **Edge** | WAFv2 with rate limiting, SQL injection, XSS rules on CloudFront + API Gateway. |
 | **Auth** | JWT authorizer + Cognito User Pool with MFA. Custom ES256 with `webcrypto.subtle`. |
 | **Encryption** | KMS customer-managed key for data at rest. TLS 1.2+ in transit. ACM auto-renewed. |
 | **Secrets** | All credentials in AWS Secrets Manager. **Zero hardcoded secrets in code.** |
-| **Audit** | CloudTrail logs every API call. GuardDuty analyzes CloudTrail + VPC Flow Logs + DNS. |
+| **Audit** | CloudTrail logs every API call. GuardDuty analyzes CloudTrail and DNS logs for threat detection. |
 | **Monitoring** | Synthetics canaries every 5 min. CloudWatch alarms → SNS → email. |
 | **CI/CD** | GitHub Actions OIDC federation. **No static AWS credentials stored anywhere.** |
 | **AI compliance** | Bedrock Guardrails: PII anonymization, topic blocking, prompt-injection defense. |
@@ -407,7 +450,7 @@ Every stack is TypeScript CDK. Dependency order managed automatically.
 |-------|-----------|
 | **Frontend** | React 18, TypeScript, Tailwind CSS, Vite, Framer Motion, Recharts, Mapbox GL, shadcn/ui |
 | **API** | API Gateway HTTP v2, Lambda (Node.js 20, ARM64/Graviton2), Lambda Layers |
-| **Database** | Aurora PostgreSQL Serverless v2, DynamoDB, ElastiCache Redis Serverless |
+| **Database** | Supabase managed PostgreSQL (system of record), DynamoDB (AI cache, token ledger, prompt registry, sessions) |
 | **AI/ML** | Amazon Bedrock (Claude Sonnet 4.5 / Haiku 4.5), Knowledge Bases, Guardrails, Titan Embeddings v2, OpenSearch Serverless |
 | **Extension** | Chrome Manifest V3, vanilla JS, 40+ supported sites, 11-market calculation engine |
 | **Auth** | Cognito User Pool with MFA + custom ES256 JWT authorizer |
@@ -422,7 +465,9 @@ Every stack is TypeScript CDK. Dependency order managed automatically.
 
 ## Related project — Swing Institute
 
-A second production SaaS by the same author. [Swing Institute](https://github.com/jashabalcom/swing-institute-architecture) is an athlete-development platform shipping web, iOS App Store, and PWA from one TypeScript codebase, with an AWS Bedrock vision pipeline (Claude Sonnet 4) for biomechanical swing analysis and Stripe Connect Express coach payouts. Terrava is the AWS-native reference architecture (CDK, Lambda, Aurora). Swing Institute is the leaner ship-first architecture (Supabase + AWS edge) with a documented migration path to the same AWS-native pattern. Each one is the right answer for its team size and compliance posture.
+A second production SaaS by the same author. [Swing Institute](https://github.com/jashabalcom/swing-institute-architecture) is an athlete-development platform shipping web, iOS App Store, and PWA from one TypeScript codebase, with an AWS Bedrock vision pipeline (Claude Sonnet 4) for biomechanical swing analysis and Stripe Connect Express coach payouts.
+
+The two have converged on a similar shape from opposite directions. Terrava started AWS-native (CDK, Lambda, Aurora in an isolated VPC tier) and retired the network and relational tier once managed Postgres proved sufficient (ADR-0017). Swing Institute started lean (Supabase + AWS edge) and has grown toward AWS-native where the workload justified it. That both landed on managed Postgres behind serverless compute is the more useful data point than either architecture alone.
 
 ---
 
